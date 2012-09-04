@@ -18,15 +18,14 @@
 
 package io.undertow.server.handlers.file;
 
-import java.nio.ByteBuffer;
+import static io.undertow.server.handlers.file.LimitedBufferSlicePool.PooledByteBuffer;
+
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 
 import org.xnio.BufferAllocator;
-import org.xnio.ByteBufferSlicePool;
-import org.xnio.Pooled;
 
 
 /**
@@ -34,10 +33,9 @@ import org.xnio.Pooled;
  */
 public class DirectBufferCache {
     @SuppressWarnings("unchecked")
-    private static final Pooled<ByteBuffer>[] EMPTY_BUFFERS = new Pooled[0];
+    private static final PooledByteBuffer[] EMPTY_BUFFERS = new PooledByteBuffer[0];
 
-    private final ByteBufferSlicePool pool;
-    private final AtomicInteger use = new AtomicInteger();
+    private final LimitedBufferSlicePool pool;
     private final int max;
     private final int sliceSize;
     private final int segmentShift;
@@ -50,7 +48,7 @@ public class DirectBufferCache {
     public DirectBufferCache(int sliceSize, int max, int concurrency) {
         this.sliceSize = sliceSize;
         this.max = max;
-        this.pool = new ByteBufferSlicePool(BufferAllocator.DIRECT_BYTE_BUFFER_ALLOCATOR, sliceSize, max);
+        this.pool = new LimitedBufferSlicePool(BufferAllocator.DIRECT_BYTE_BUFFER_ALLOCATOR, sliceSize, max);
         int shift = 1;
         while (concurrency > (shift <<= 1)) {}
         segmentShift = 32 - shift;
@@ -90,7 +88,11 @@ public class DirectBufferCache {
         private int max;
 
         public MaxLinkedMap(int max) {
-            super(3, 0.66f, false);
+            this(max, false);
+        }
+
+        public MaxLinkedMap(int max, boolean access) {
+            super(3, 0.66f, access);
             this.max = max;
         }
 
@@ -102,14 +104,14 @@ public class DirectBufferCache {
 
     private static class CacheMap extends MaxLinkedMap<String, CacheEntry> {
         private CacheMap(int max) {
-            super(max);
+            super(max, true);
         }
 
         @Override
         protected boolean removeEldestEntry(Map.Entry<String, CacheEntry> eldest) {
             if (super.removeEldestEntry(eldest))  {
                 CacheEntry value = eldest.getValue();
-                value.destroy();
+                value.dereference();
                 return true;
             }
 
@@ -117,13 +119,16 @@ public class DirectBufferCache {
         }
     }
 
-    public class CacheEntry {
-        private final int size;
-        private volatile Pooled<ByteBuffer>[] buffers;
-        private volatile boolean enabled;
-        private volatile long time;
+    public static class CacheEntry {
+        private static final AtomicIntegerFieldUpdater<CacheEntry> refsUpdater = AtomicIntegerFieldUpdater.newUpdater(CacheEntry.class, "refs");
+        private static final AtomicIntegerFieldUpdater<CacheEntry> enabledUpdater = AtomicIntegerFieldUpdater.newUpdater(CacheEntry.class, "enabled");
 
-        public CacheEntry(int size, Pooled<ByteBuffer>[] buffers) {
+        private final int size;
+        private volatile PooledByteBuffer[] buffers;
+        private volatile int enabled;
+        private volatile int refs;
+
+        public CacheEntry(int size, PooledByteBuffer[] buffers) {
             this.size = size;
             this.buffers = buffers;
         }
@@ -132,36 +137,62 @@ public class DirectBufferCache {
             return size;
         }
 
-        public Pooled<ByteBuffer>[] buffers() {
+        public PooledByteBuffer[] buffers() {
             return buffers;
         }
 
-        public boolean isEnabled() {
-            return enabled;
+        public boolean enabled() {
+            return enabled == 2;
         }
 
-        public long time() {
-            return time;
-        }
-
-        public void setTime(int time) {
-            this.time  = time;
+        public boolean claimEnable() {
+            return enabledUpdater.compareAndSet(this, 0, 1);
         }
 
         public void enable() {
-            this.enabled = true;
+            this.enabled = 2;
         }
 
-        public void destroy() {
-            enabled = false;
+        public void disable() {
+            this.enabled = 0;
+        }
 
-            for (Pooled<ByteBuffer> buffer : buffers()) {
-                buffer.free();
-                use.getAndAdd(-sliceSize);
+        public int reference() {
+            for(;;) {
+                int refs = this.refs;
+                if (refs < 1) {
+                    return refs; // destroying
+                }
+
+                if (refsUpdater.compareAndSet(this, refs++, refs)) {
+                    return refs;
+                }
             }
-            buffers = EMPTY_BUFFERS;
         }
 
+        public int dereference() {
+            for(;;) {
+                int refs = this.refs;
+                if (refs < 1) {
+                    return refs;  // destroying
+                }
+
+                if (refsUpdater.compareAndSet(this, refs--, refs)) {
+                    if (refs == 0) {
+                        destroy();
+                    }
+                    return refs;
+                }
+            }
+        }
+
+        private void destroy() {
+            buffers = EMPTY_BUFFERS;
+
+            for (PooledByteBuffer buffer : buffers()) {
+                buffer.free();
+            }
+        }
     }
 
     private class Segment {
@@ -196,57 +227,61 @@ public class DirectBufferCache {
             return entry;
         }
 
-        private boolean reserveSpace(int size) {
-            boolean reserved = false;
-            while (!reserved) {
-                int inUse = use.get();
-                if (inUse + size > max) {
-                    return false;
-                }
-
-                reserved = use.compareAndSet(inUse, inUse + size);
-            }
-
-            return true;
-        }
-
         private CacheEntry addCacheEntry(String path, int size) {
             int reserveSize = sliceSize;
             while (reserveSize < size) {
                 reserveSize += sliceSize;
             }
 
-            Iterator<CacheEntry> iterator = cache.values().iterator();
-            boolean reserved = reserveSpace(reserveSize);
-            while (!reserved && iterator.hasNext()) {
-                CacheEntry value = iterator.next();
-                iterator.remove();
-                value.destroy();
-                reserved = reserveSpace(reserveSize);
+            PooledByteBuffer[] buffers = allocate(reserveSize);
+            if (buffers == null) {
+               Iterator<CacheEntry> iterator = cache.values().iterator();
+               int released = 0;
+                while (released < reserveSize && iterator.hasNext()) {
+                    CacheEntry value = iterator.next();
+                    iterator.remove();
+                    value.dereference();
+                    released += value.size();
+                }
+                buffers = allocate(reserveSize);
             }
 
-            if (!reserved) {
+            if (buffers == null) {
                 return null;
-            }
-
-            int num = reserveSize / sliceSize;
-            @SuppressWarnings("unchecked")
-            Pooled<ByteBuffer>[] buffers = new Pooled[num];
-            for (int i = 0; i < num; i++) {
-                buffers[i] = pool.allocate();
             }
 
             CacheEntry result = new CacheEntry(size, buffers);
             cache.put(path, result);
 
             return result;
+        }
 
+        private PooledByteBuffer[] allocate(int reserveSize) {
+            LimitedBufferSlicePool slicePool = pool;
+            if (! slicePool.canAllocate(reserveSize)) {
+                return null;
+            }
+
+            PooledByteBuffer[] buffers = new PooledByteBuffer[reserveSize];
+            for (int i = 0; i < reserveSize; i++) {
+                PooledByteBuffer allocate = slicePool.allocate();
+                if (allocate == null) {
+                    while (--i >= 0) {
+                        buffers[i].free();
+                    }
+
+                    return null;
+                }
+
+                buffers[i] = allocate;
+            }
+            return buffers;
         }
 
         public void remove(String path) {
             CacheEntry remove = cache.remove(path);
             if (remove != null)
-                remove.destroy();
+                remove.dereference();
         }
     }
 }
