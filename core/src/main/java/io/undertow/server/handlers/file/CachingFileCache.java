@@ -173,7 +173,8 @@ public class CachingFileCache implements FileCache {
                 entry = cache.add(path, (int) length);
             }
 
-            if (entry == null || entry.buffers().length == 0) {
+
+            if (entry == null || entry.buffers().length == 0 || !entry.claimEnable()) {
                 transfer(channel, fileChannel, length);
                 return;
             }
@@ -182,7 +183,7 @@ public class CachingFileCache implements FileCache {
             LimitedBufferSlicePool.PooledByteBuffer[] pooled = entry.buffers();
             ByteBuffer[] buffers = new ByteBuffer[pooled.length];
             for (int i = 0; i < buffers.length; i++) {
-                buffers[i] = pooled[i].getResource().slice();
+                buffers[i] = pooled[i].getResource();
             }
 
             long remaining = length;
@@ -195,6 +196,7 @@ public class CachingFileCache implements FileCache {
                 } catch (IOException e) {
                     IoUtils.safeClose(fileChannel);
                     entry.dereference();
+                    entry.disable();
                     exchange.setResponseCode(500);
                     completionHandler.handleComplete();
                     return;

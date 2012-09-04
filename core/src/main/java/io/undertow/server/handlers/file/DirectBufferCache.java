@@ -136,6 +136,8 @@ public class DirectBufferCache {
     public static final class CacheEntry {
         private static final AtomicIntegerFieldUpdater<CacheEntry> hitsUpdater = AtomicIntegerFieldUpdater.newUpdater(CacheEntry.class, "hits");
         private static final AtomicIntegerFieldUpdater<CacheEntry> refsUpdater = AtomicIntegerFieldUpdater.newUpdater(CacheEntry.class, "refs");
+        private static final AtomicIntegerFieldUpdater<CacheEntry> enabledUpdator = AtomicIntegerFieldUpdater.newUpdater(CacheEntry.class, "enabled");
+
         private static final AtomicReferenceFieldUpdater<CacheEntry, PooledByteBuffer[]> bufsUpdater = AtomicReferenceFieldUpdater.newUpdater(CacheEntry.class, PooledByteBuffer[].class, "buffers");
         private static final AtomicReferenceFieldUpdater<CacheEntry, Object> tokenUpdator = AtomicReferenceFieldUpdater.newUpdater(CacheEntry.class, Object.class, "accessToken");
         private static final Object CLAIM_TOKEN = new Object();
@@ -147,7 +149,9 @@ public class DirectBufferCache {
         private volatile int refs = 1;
         private volatile int hits = 1;
         private volatile Object accessToken;
-        private volatile boolean enabled;
+        private volatile int enabled;
+
+
 
         private CacheEntry(String path, int size, DirectBufferCache cache) {
             this.path = path;
@@ -172,11 +176,19 @@ public class DirectBufferCache {
         }
 
         public boolean enabled() {
-            return enabled;
+            return enabled == 2;
         }
 
         public void enable() {
-            this.enabled = true;
+            this.enabled = 2;
+        }
+
+        public void disable() {
+            this.enabled = 0;
+        }
+
+        public boolean claimEnable() {
+            return enabledUpdator.compareAndSet(this, 0, 1);
         }
 
         public int reference() {
