@@ -212,7 +212,7 @@ public class DirectBufferCache {
         public synchronized CacheEntry add(String path, int size) {
             CacheEntry entry = cache.get(path);
             if (entry != null)
-                return null;
+                return entry;
 
             Integer i = candidates.get(path);
             int count = i == null ? 0 : i.intValue();
@@ -230,7 +230,7 @@ public class DirectBufferCache {
         private CacheEntry addCacheEntry(String path, int size) {
             int reserveSize = size;
             int sliceSize = DirectBufferCache.this.sliceSize;
-            int n = 0;
+            int n = 1;
             while ((reserveSize -= sliceSize) > 0) {
                 n++;
             }
