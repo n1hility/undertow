@@ -182,7 +182,7 @@ public class CachingFileCache implements FileCache {
             LimitedBufferSlicePool.PooledByteBuffer[] pooled = entry.buffers();
             ByteBuffer[] buffers = new ByteBuffer[pooled.length];
             for (int i = 0; i < buffers.length; i++) {
-                buffers[i] = pooled[i].getResource();
+                buffers[i] = pooled[i].getResource().slice();
             }
 
             long remaining = length;
