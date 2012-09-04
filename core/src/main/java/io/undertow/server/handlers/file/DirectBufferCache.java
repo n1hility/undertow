@@ -228,22 +228,24 @@ public class DirectBufferCache {
         }
 
         private CacheEntry addCacheEntry(String path, int size) {
-            int reserveSize = sliceSize;
-            while (reserveSize < size) {
-                reserveSize += sliceSize;
+            int reserveSize = size;
+            int sliceSize = DirectBufferCache.this.sliceSize;
+            int n = 0;
+            while ((reserveSize -= sliceSize) > 0) {
+                n++;
             }
 
-            PooledByteBuffer[] buffers = allocate(reserveSize);
+            PooledByteBuffer[] buffers = allocate(n);
             if (buffers == null) {
-               Iterator<CacheEntry> iterator = cache.values().iterator();
-               int released = 0;
-                while (released < reserveSize && iterator.hasNext()) {
+                Iterator<CacheEntry> iterator = cache.values().iterator();
+                int released = 0;
+                while (released < size && iterator.hasNext()) {
                     CacheEntry value = iterator.next();
                     iterator.remove();
                     value.dereference();
                     released += value.size();
                 }
-                buffers = allocate(reserveSize);
+                buffers = allocate(n);
             }
 
             if (buffers == null) {
@@ -256,14 +258,14 @@ public class DirectBufferCache {
             return result;
         }
 
-        private PooledByteBuffer[] allocate(int reserveSize) {
+        private PooledByteBuffer[] allocate(int slices) {
             LimitedBufferSlicePool slicePool = pool;
-            if (! slicePool.canAllocate(reserveSize)) {
+            if (! slicePool.canAllocate(slices)) {
                 return null;
             }
 
-            PooledByteBuffer[] buffers = new PooledByteBuffer[reserveSize];
-            for (int i = 0; i < reserveSize; i++) {
+            PooledByteBuffer[] buffers = new PooledByteBuffer[slices];
+            for (int i = 0; i < slices; i++) {
                 PooledByteBuffer allocate = slicePool.allocate();
                 if (allocate == null) {
                     while (--i >= 0) {
