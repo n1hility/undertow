@@ -126,7 +126,7 @@ public final class LimitedBufferSlicePool {
     }
 
     public boolean canAllocate(int slices) {
-        if (regionsUsed < maxRegions)
+        if (maxRegions == 0 || regionsUsed < maxRegions)
             return true;
 
         if (sliceQueue.isEmpty())

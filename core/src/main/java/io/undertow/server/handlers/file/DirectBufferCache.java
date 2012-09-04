@@ -48,7 +48,7 @@ public class DirectBufferCache {
     public DirectBufferCache(int sliceSize, int max, int concurrency) {
         this.sliceSize = sliceSize;
         this.max = max;
-        this.pool = new LimitedBufferSlicePool(BufferAllocator.DIRECT_BYTE_BUFFER_ALLOCATOR, sliceSize, max);
+        this.pool = new LimitedBufferSlicePool(BufferAllocator.DIRECT_BYTE_BUFFER_ALLOCATOR, sliceSize, max, 1);
         int shift = 1;
         while (concurrency > (shift <<= 1)) {}
         segmentShift = 32 - shift;
